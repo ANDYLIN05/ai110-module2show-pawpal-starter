@@ -21,6 +21,12 @@ if "owner" not in st.session_state:
 if "pet" not in st.session_state:
     st.session_state.pet = None
 
+if "last_schedule" not in st.session_state:
+    st.session_state.last_schedule = None
+
+if "last_plan_text" not in st.session_state:
+    st.session_state.last_plan_text = None
+
 # --- Owner & Pet Setup ---
 st.subheader("Owner & Pet Setup")
 
@@ -32,12 +38,13 @@ species = st.selectbox("Species", ["dog", "cat", "other"])
 energy_level = st.selectbox("Energy level", ["low", "medium", "high"], index=1)
 
 if st.button("Set Owner & Pet"):
-    # Create Owner and Pet using pawpal_system classes
-    st.session_state.owner = Owner(name=owner_name, available_minutes=available_minutes)
+    # Update owner settings in-place so existing pets are preserved
+    st.session_state.owner.name = owner_name
+    st.session_state.owner.available_minutes = available_minutes
     pet = Pet(name=pet_name, species=species, energy_level=energy_level)
     st.session_state.owner.add_pet(pet)
     st.session_state.pet = pet
-    st.success(f"Owner '{owner_name}' and pet '{pet_name}' saved!")
+    st.success(f"Pet '{pet_name}' added to owner '{owner_name}'!")
 
 st.divider()
 
@@ -61,13 +68,44 @@ if st.button("Add Task"):
         st.session_state.pet.add_task(task)
         st.success(f"Task '{task_title}' added to {st.session_state.pet.name}!")
 
-# Show current tasks
+# --- Show & Edit/Delete Tasks ---
 if st.session_state.pet and st.session_state.pet.tasks:
     st.write(f"Tasks for **{st.session_state.pet.name}**:")
-    st.table([
-        {"title": t.title, "duration_minutes": t.duration_minutes, "priority": t.priority, "completed": t.completed}
-        for t in st.session_state.pet.tasks
-    ])
+    for i, t in enumerate(st.session_state.pet.tasks):
+        col_info, col_edit, col_del = st.columns([4, 1, 1])
+        with col_info:
+            st.write(f"**{t.title}** — {t.duration_minutes} min | {t.priority} priority | done: {t.completed}")
+        with col_edit:
+            if st.button("Edit", key=f"edit_{i}"):
+                st.session_state[f"editing_{i}"] = True
+        with col_del:
+            if st.button("Delete", key=f"del_{i}"):
+                st.session_state.pet.tasks.pop(i)
+                st.rerun()
+
+        # Inline edit form
+        if st.session_state.get(f"editing_{i}"):
+            with st.form(key=f"edit_form_{i}"):
+                new_title = st.text_input("Title", value=t.title)
+                new_duration = st.number_input("Duration (minutes)", min_value=1, max_value=240, value=t.duration_minutes)
+                new_priority = st.selectbox("Priority", ["low", "medium", "high"], index=["low", "medium", "high"].index(t.priority))
+                new_completed = st.checkbox("Mark as completed", value=t.completed)
+                save_col, cancel_col = st.columns(2)
+                with save_col:
+                    submitted = st.form_submit_button("Save")
+                with cancel_col:
+                    cancelled = st.form_submit_button("Cancel")
+
+            if submitted:
+                t.title = new_title
+                t.duration_minutes = int(new_duration)
+                t.priority = new_priority
+                t.completed = new_completed
+                del st.session_state[f"editing_{i}"]
+                st.rerun()
+            elif cancelled:
+                del st.session_state[f"editing_{i}"]
+                st.rerun()
 else:
     st.info("No tasks yet. Add one above.")
 
@@ -77,10 +115,26 @@ st.divider()
 st.subheader("Build Schedule")
 st.caption("Calls Scheduler.build_master_schedule() across all pets.")
 
-if st.button("Generate Schedule"):
-    if not st.session_state.owner.pets:
-        st.warning("Set an owner and pet first.")
-    else:
-        brain = Scheduler(owner=st.session_state.owner)
-        schedule = brain.build_master_schedule()
-        st.text(brain.explain_plan(schedule))
+col_gen, col_reset = st.columns(2)
+with col_gen:
+    if st.button("Generate Schedule"):
+        if not st.session_state.owner.pets:
+            st.warning("Set an owner and pet first.")
+        else:
+            brain = Scheduler(owner=st.session_state.owner)
+            schedule = brain.build_master_schedule()
+            st.session_state.last_schedule = schedule
+            st.session_state.last_plan_text = brain.explain_plan(schedule)
+
+with col_reset:
+    if st.button("Reset Schedule"):
+        st.session_state.last_schedule = None
+        st.session_state.last_plan_text = None
+        # Mark all tasks as not completed so the scheduler can re-evaluate
+        for pet in st.session_state.owner.pets:
+            for task in pet.tasks:
+                task.completed = False
+        st.success("Schedule cleared. Tasks reset to not completed.")
+
+if st.session_state.last_plan_text:
+    st.text(st.session_state.last_plan_text)
