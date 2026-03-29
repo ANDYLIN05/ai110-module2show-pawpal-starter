@@ -51,7 +51,9 @@ classDiagram
 ```
 """
 
+from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 
 PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 
@@ -62,9 +64,30 @@ class Task:
     duration_minutes: int
     priority: str = "medium"
     completed: bool = False
+    time: str = "00:00"          # Scheduled time in "HH:MM" format
+    frequency: str = "once"      # Recurrence: "once", "daily", or "weekly"
+    due_date: date | None = None  # Date this occurrence is due
 
     def mark_done(self):
         self.completed = True
+
+    def next_occurrence(self) -> "Task":
+        """Return a new Task for the next recurrence based on frequency."""
+        base = self.due_date if self.due_date else date.today()
+        if self.frequency == "daily":
+            next_due = base + timedelta(days=1)
+        elif self.frequency == "weekly":
+            next_due = base + timedelta(weeks=1)
+        else:
+            raise ValueError(f"Task '{self.title}' has frequency='once'; no next occurrence.")
+        return Task(
+            title=self.title,
+            duration_minutes=self.duration_minutes,
+            priority=self.priority,
+            time=self.time,
+            frequency=self.frequency,
+            due_date=next_due,
+        )
 
 
 @dataclass
@@ -90,11 +113,7 @@ class Owner:
     @property
     def all_pet_tasks(self) -> list[tuple[Pet, Task]]:
         """Required: Provides access to all tasks across all pets."""
-        combined = []
-        for pet in self.pets:
-            for task in pet.tasks:
-                combined.append((pet, task))
-        return combined
+        return [(pet, task) for pet in self.pets for task in pet.tasks]
 
 
 @dataclass
@@ -126,19 +145,16 @@ class Scheduler:  # The "Brain"
 
     def build_master_schedule(self) -> list[tuple[Pet, Task]]:
         """Manages tasks ACROSS pets based on owner's time."""
-        # 1. Retrieve all tasks from owner
-        all_items = self.owner.all_pet_tasks
+        # Filter and sort in one pass: incomplete tasks that pass constraints, highest priority first
+        eligible = sorted(
+            (
+                (pet, task) for pet, task in self.owner.all_pet_tasks
+                if not task.completed and self._passes_constraints(task, pet)
+            ),
+            key=lambda item: PRIORITY_ORDER[item[1].priority],
+        )
 
-        # 2. Filter by completion and constraints
-        eligible = [
-            (pet, task) for pet, task in all_items
-            if not task.completed and self._passes_constraints(task, pet)
-        ]
-
-        # 3. Sort by priority
-        eligible.sort(key=lambda item: PRIORITY_ORDER[item[1].priority])
-
-        # 4. Budget time
+        # Budget time: greedily fit tasks within available minutes
         schedule = []
         time_left = self.owner.available_minutes
         for pet, task in eligible:
@@ -147,6 +163,45 @@ class Scheduler:  # The "Brain"
                 time_left -= task.duration_minutes
 
         return schedule
+
+    def mark_task_complete(self, pet: Pet, task: Task) -> Task | None:
+        """Mark a task done. If it recurs, add the next occurrence to the pet and return it."""
+        task.mark_done()
+        if task.frequency in ("daily", "weekly"):
+            next_task = task.next_occurrence()
+            pet.add_task(next_task)
+            return next_task
+        return None
+
+    def detect_conflicts(self, schedule: list[tuple[Pet, Task]]) -> list[str]:
+        """Return warning strings for any tasks sharing the same scheduled time."""
+        by_time: dict[str, list] = defaultdict(list)
+        for pet, task in schedule:
+            by_time[task.time].append((pet, task))
+
+        return [
+            f"WARNING: Time conflict at {slot} -> "
+            + ", ".join(f"[{p.name}] {t.title}" for p, t in items)
+            for slot, items in by_time.items()
+            if len(items) > 1
+        ]
+
+    def sort_by_time(self, schedule: list[tuple[Pet, Task]]) -> list[tuple[Pet, Task]]:
+        """Return schedule sorted by each task's time attribute (HH:MM string)."""
+        return sorted(schedule, key=lambda item: item[1].time)
+
+    def filter_tasks(
+        self,
+        completed: bool | None = None,
+        pet_name: str | None = None,
+    ) -> list[tuple[Pet, Task]]:
+        """Return all (pet, task) pairs filtered by completion status and/or pet name."""
+        results = self.owner.all_pet_tasks
+        if completed is not None:
+            results = [(pet, task) for pet, task in results if task.completed == completed]
+        if pet_name is not None:
+            results = [(pet, task) for pet, task in results if pet.name == pet_name]
+        return results
 
     def explain_plan(self, schedule: list[tuple[Pet, Task]]) -> str:
         if not schedule:
